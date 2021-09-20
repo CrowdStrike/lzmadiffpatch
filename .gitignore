@@ -1,0 +1,16 @@
+# first line comment in case a UTF-8 BOM sneaks into this file
+*~
+/Release
+/Debug
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+.vs
+out

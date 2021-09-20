@@ -1,0 +1,205 @@
+diff --git a/lzma1900/C/Lzma2Enc.c b/lzma1900/C/Lzma2Enc.c
+index 5c1ad493..b715848b 100644
+--- a/lzma1900/C/Lzma2Enc.c
++++ b/lzma1900/C/Lzma2Enc.c
+@@ -115,8 +115,9 @@ SRes LzmaEnc_PrepareForLzma2(CLzmaEncHandle pp, ISeqInStream *inStream, UInt32 k
+     ISzAllocPtr alloc, ISzAllocPtr allocBig);
+ SRes LzmaEnc_MemPrepare(CLzmaEncHandle pp, const Byte *src, SizeT srcLen,
+     UInt32 keepWindowSize, ISzAllocPtr alloc, ISzAllocPtr allocBig);
+-SRes LzmaEnc_CodeOneMemBlock(CLzmaEncHandle pp, BoolInt reInit,
+-    Byte *dest, size_t *destLen, UInt32 desiredPackSize, UInt32 *unpackSize);
++SRes LzmaEnc_CodeOneMemBlock(
++    CLzmaEncHandle pp, BoolInt reInit, Byte *dest, size_t *destLen, UInt32 desiredPackSize,
++    UInt32 *unpackSize, UInt32 bytesToSkip);
+ const Byte *LzmaEnc_GetCurBuf(CLzmaEncHandle pp);
+ void LzmaEnc_Finish(CLzmaEncHandle pp);
+ void LzmaEnc_SaveState(CLzmaEncHandle pp);
+@@ -126,8 +127,10 @@ void LzmaEnc_RestoreState(CLzmaEncHandle pp);
+ UInt32 LzmaEnc_GetNumAvailableBytes(CLzmaEncHandle pp);
+ */
+ 
+-static SRes Lzma2EncInt_EncodeSubblock(CLzma2EncInt *p, Byte *outBuf,
+-    size_t *packSizeRes, ISeqOutStream *outStream)
++static SRes Lzma2EncInt_EncodeSubblock(
++    CLzma2EncInt *p, Byte *outBuf,
++    size_t *packSizeRes, ISeqOutStream *outStream,
++    UInt32 skipBytes)
+ {
+   size_t packSizeLimit = *packSizeRes;
+   size_t packSize = packSizeLimit;
+@@ -142,9 +145,11 @@ static SRes Lzma2EncInt_EncodeSubblock(CLzma2EncInt *p, Byte *outBuf,
+   packSize -= lzHeaderSize;
+   
+   LzmaEnc_SaveState(p->enc);
+-  res = LzmaEnc_CodeOneMemBlock(p->enc, p->needInitState,
+-      outBuf + lzHeaderSize, &packSize, LZMA2_PACK_SIZE_MAX, &unpackSize);
+-  
++  res = LzmaEnc_CodeOneMemBlock(
++      p->enc, p->needInitState,
++      outBuf + lzHeaderSize, &packSize, LZMA2_PACK_SIZE_MAX, &unpackSize, skipBytes);
++  p->srcPos += skipBytes;
++
+   PRF(printf("\npackSize = %7d unpackSize = %7d  ", packSize, unpackSize));
+ 
+   if (unpackSize == 0)
+@@ -235,6 +240,7 @@ void Lzma2EncProps_Init(CLzma2EncProps *p)
+   p->numBlockThreads_Reduced = -1;
+   p->numBlockThreads_Max = -1;
+   p->numTotalThreads = -1;
++  p->skipBytes = 0;
+ }
+ 
+ void Lzma2EncProps_Normalize(CLzma2EncProps *p)
+@@ -508,6 +514,7 @@ static SRes Lzma2Enc_EncodeMt1(
+   UInt64 packTotal = 0;
+   size_t outLim = 0;
+   CLimitedSeqInStream limitedInStream;
++  UInt32 bytesToSkip;
+ 
+   if (outBuf)
+   {
+@@ -542,6 +549,8 @@ static SRes Lzma2Enc_EncodeMt1(
+ 
+   RINOK(Lzma2EncInt_InitStream(p, &me->props));
+ 
++  bytesToSkip = me->props.skipBytes;
++
+   for (;;)
+   {
+     SRes res = SZ_OK;
+@@ -593,13 +602,17 @@ static SRes Lzma2Enc_EncodeMt1(
+       if (outBuf)
+         packSize = outLim - (size_t)packTotal;
+       
+-      res = Lzma2EncInt_EncodeSubblock(p,
++      res = Lzma2EncInt_EncodeSubblock(
++          p,
+           outBuf ? outBuf + (size_t)packTotal : me->tempBufLzma, &packSize,
+-          outBuf ? NULL : outStream);
+-      
++          outBuf ? NULL : outStream,
++          bytesToSkip);
++
+       if (res != SZ_OK)
+         break;
+ 
++      bytesToSkip = 0;
++
+       packTotal += packSize;
+       if (outBuf)
+         *outBufSize = (size_t)packTotal;
+diff --git a/lzma1900/C/Lzma2Enc.h b/lzma1900/C/Lzma2Enc.h
+index 6a6110ff..f75e680d 100644
+--- a/lzma1900/C/Lzma2Enc.h
++++ b/lzma1900/C/Lzma2Enc.h
+@@ -15,6 +15,7 @@ typedef struct
+ {
+   CLzmaEncProps lzmaProps;
+   UInt64 blockSize;
++  UInt32 skipBytes;
+   int numBlockThreads_Reduced;
+   int numBlockThreads_Max;
+   int numTotalThreads;
+diff --git a/lzma1900/C/LzmaEnc.c b/lzma1900/C/LzmaEnc.c
+index 46a0db00..031caa7c 100644
+--- a/lzma1900/C/LzmaEnc.c
++++ b/lzma1900/C/LzmaEnc.c
+@@ -2259,7 +2259,7 @@ void LzmaEnc_Destroy(CLzmaEncHandle p, ISzAllocPtr alloc, ISzAllocPtr allocBig)
+ }
+ 
+ 
+-static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p, UInt32 maxPackSize, UInt32 maxUnpackSize)
++static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p, UInt32 maxPackSize, UInt32 maxUnpackSize, UInt32 bytesToSkip)
+ {
+   UInt32 nowPos32, startPos32;
+   if (p->needInit)
+@@ -2272,22 +2272,44 @@ static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p, UInt32 maxPackSize, UInt32 maxUnpa
+     return p->result;
+   RINOK(CheckErrors(p));
+ 
+-  nowPos32 = (UInt32)p->nowPos64;
+-  startPos32 = nowPos32;
+-
+-  if (p->nowPos64 == 0)
+   {
+-    unsigned numPairs;
+-    Byte curByte;
+-    if (p->matchFinder.GetNumAvailableBytes(p->matchFinderObj) == 0)
+-      return Flush(p, nowPos32);
+-    ReadMatchDistances(p, &numPairs);
+-    RangeEnc_EncodeBit_0(&p->rc, &p->isMatch[kState_Start][0]);
+-    // p->state = kLiteralNextStates[p->state];
+-    curByte = *(p->matchFinder.GetPointerToCurrentPos(p->matchFinderObj) - p->additionalOffset);
+-    LitEnc_Encode(&p->rc, p->litProbs, curByte);
+-    p->additionalOffset--;
+-    nowPos32++;
++      UInt32 oldBytesToSkip = bytesToSkip;
++      while (bytesToSkip && p->matchFinder.GetNumAvailableBytes(p->matchFinderObj))
++      {
++          UInt32 skipBit = p->matchFinder.GetNumAvailableBytes(p->matchFinderObj);
++          if (skipBit > bytesToSkip)
++              skipBit = bytesToSkip;
++          p->matchFinder.Skip(p->matchFinderObj, skipBit);
++          bytesToSkip -= skipBit;
++      }
++      if (bytesToSkip)
++          return SZ_ERROR_INPUT_EOF;
++
++      nowPos32 = (UInt32)p->nowPos64;
++      startPos32 = nowPos32;
++
++      if (p->nowPos64 == 0)
++      {
++        unsigned numPairs;
++        Byte curByte;
++        CLzmaProb *probs = p->litProbs;
++        const Byte *data;
++
++        if (p->matchFinder.GetNumAvailableBytes(p->matchFinderObj) == 0)
++          return Flush(p, nowPos32);
++        ReadMatchDistances(p, &numPairs);
++        RangeEnc_EncodeBit_0(&p->rc, &p->isMatch[kState_Start][0]);
++        // p->state = kLiteralNextStates[p->state];
++        data = p->matchFinder.GetPointerToCurrentPos(p->matchFinderObj) - p->additionalOffset;
++        curByte = *data;
++        if (oldBytesToSkip > 0)
++        {
++            probs = LIT_PROBS(nowPos32, *(data - 1));
++        }
++        LitEnc_Encode(&p->rc, probs, curByte);
++        p->additionalOffset--;
++        nowPos32++;
++      }
+   }
+ 
+   if (p->matchFinder.GetNumAvailableBytes(p->matchFinderObj) != 0)
+@@ -2802,8 +2824,9 @@ const Byte *LzmaEnc_GetCurBuf(CLzmaEncHandle pp)
+ }
+ 
+ 
+-SRes LzmaEnc_CodeOneMemBlock(CLzmaEncHandle pp, BoolInt reInit,
+-    Byte *dest, size_t *destLen, UInt32 desiredPackSize, UInt32 *unpackSize)
++SRes LzmaEnc_CodeOneMemBlock(
++    CLzmaEncHandle pp, BoolInt reInit,
++    Byte *dest, size_t *destLen, UInt32 desiredPackSize, UInt32 *unpackSize, UInt32 bytesToSkip)
+ {
+   CLzmaEnc *p = (CLzmaEnc *)pp;
+   UInt64 nowPos64;
+@@ -2830,7 +2853,7 @@ SRes LzmaEnc_CodeOneMemBlock(CLzmaEncHandle pp, BoolInt reInit,
+   if (desiredPackSize == 0)
+     return SZ_ERROR_OUTPUT_EOF;
+ 
+-  res = LzmaEnc_CodeOneBlock(p, desiredPackSize, *unpackSize);
++  res = LzmaEnc_CodeOneBlock(p, desiredPackSize, *unpackSize, bytesToSkip);
+   
+   *unpackSize = (UInt32)(p->nowPos64 - nowPos64);
+   *destLen -= outStream.rem;
+@@ -2853,7 +2876,7 @@ static SRes LzmaEnc_Encode2(CLzmaEnc *p, ICompressProgress *progress)
+ 
+   for (;;)
+   {
+-    res = LzmaEnc_CodeOneBlock(p, 0, 0);
++    res = LzmaEnc_CodeOneBlock(p, 0, 0, 0);
+     if (res != SZ_OK || p->finished)
+       break;
+     if (progress)

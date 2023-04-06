@@ -185,16 +185,22 @@ index 46a0db00..031caa7c 100644
  {
    CLzmaEnc *p = (CLzmaEnc *)pp;
    UInt64 nowPos64;
-@@ -2830,7 +2853,7 @@ SRes LzmaEnc_CodeOneMemBlock(CLzmaEncHandle pp, BoolInt reInit,
+@@ -2826,11 +2849,12 @@ SRes LzmaEnc_CodeOneMemBlock(CLzmaEncHandle pp, BoolInt reInit,
+   nowPos64 = p->nowPos64;
+   RangeEnc_Init(&p->rc);
+-  p->rc.outStream = &outStream.vt;
+
    if (desiredPackSize == 0)
      return SZ_ERROR_OUTPUT_EOF;
  
 -  res = LzmaEnc_CodeOneBlock(p, desiredPackSize, *unpackSize);
++  p->rc.outStream = &outStream.vt;
 +  res = LzmaEnc_CodeOneBlock(p, desiredPackSize, *unpackSize, bytesToSkip);
++  p->rc.outStream = 0;
    
    *unpackSize = (UInt32)(p->nowPos64 - nowPos64);
    *destLen -= outStream.rem;
-@@ -2853,7 +2876,7 @@ static SRes LzmaEnc_Encode2(CLzmaEnc *p, ICompressProgress *progress)
+@@ -2853,7 +2877,7 @@ static SRes LzmaEnc_Encode2(CLzmaEnc *p, ICompressProgress *progress)
  
    for (;;)
    {
